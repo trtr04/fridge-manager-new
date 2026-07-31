@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+dist/
+.vite/
+node_modules* 2/
+* 2/
+data/howtocook/
+.DS_Store
+**/.DS_Store
+.Rhistory
