@@ -47,27 +47,67 @@ const TOOL_KEYS = new Set([
   "碗",
 ]);
 
-const DIET_RESTRICTIONS = {
-  vegetarian: [
-    "猪肉",
-    "牛肉",
-    "羊肉",
-    "鸡肉",
-    "鸭",
-    "鱼",
-    "虾",
-    "蟹",
-    "排骨",
-    "五花肉",
-    "肥牛",
-    "牛腩",
-    "鸡翅",
-    "鸡腿",
-    "肉末",
-  ],
-  noPork: ["猪肉", "五花肉", "排骨", "猪蹄", "猪皮", "肉末"],
-  noBeef: ["牛肉", "肥牛", "牛腩", "牛排"],
+const RESTRICTION_FAMILIES = {
+  pork: {
+    ingredient:
+      /猪|五花肉|排骨|猪蹄|猪皮|猪油|猪肝|猪肚|猪耳|猪骨|肥肠|肘子|大肉|大排|排条|里脊肉|叉烧|肉松|腊肉|腊肠|香肠|火腿|培根|午餐肉|肉末|肉馅|瘦肉/,
+    title:
+      /猪|五花肉|排骨|猪蹄|肥肠|肘子|大排|排条|里脊肉|叉烧|腊肉|腊肠|香肠|火腿|培根|红烧肉|回锅肉|肉末|肉馅/,
+  },
+  beef: {
+    ingredient:
+      /牛肉|肥牛|牛腩|牛排|牛柳|牛里脊|牛腱|牛筋|牛肚|牛百叶|牛杂|牛丸|免治牛|黄牛/,
+    title:
+      /牛肉|肥牛|牛腩|牛排|牛柳|牛里脊|牛腱|牛筋|牛肚|牛百叶|牛杂|牛丸|免治牛|黄牛/,
+  },
+  lamb: {
+    ingredient: /羊肉|羊排|羊腿|羊蝎子|羊杂|羊肚|羊肉卷/,
+    title: /羊肉|羊排|羊腿|羊蝎子|羊杂|羊肚/,
+  },
+  poultry: {
+    ingredient:
+      /鸡(?!蛋|精)|鸭肉|鸭腿|鸭翅|鸭胸|烤鸭|鹅肉|鹅腿|火鸡/,
+    title:
+      /鸡肉|鸡翅|鸡腿|鸡胸|鸡爪|鸡脚|鸡胗|鸡肝|童子鸡|乌鸡|口水鸡|烤鸡|炸鸡|鸭肉|鸭腿|鸭翅|鸭胸|烤鸭|鹅肉|鹅腿|火鸡/,
+  },
+  seafood: {
+    ingredient:
+      /鱼|虾|蟹|海参|生蚝|牡蛎|蛏|蛤|贝|鳝|鱿鱼|章鱼|墨鱼|海蜇|鲍鱼|扇贝|螺|三文鱼|金枪鱼|鳕|带鱼|鲫|鲤|鳊|鲈|鱼露|蚝油/,
+    title:
+      /鱼(?!香)|虾|蟹|海参|生蚝|牡蛎|蛏|蛤|鳝|鱿鱼|章鱼|墨鱼|海蜇|鲍鱼|扇贝|三文鱼|金枪鱼|鳕|带鱼|鲫|鲤|鳊|鲈/,
+  },
+  egg: {
+    ingredient: /鸡蛋|鸭蛋|鹅蛋|鹌鹑蛋|蛋黄|蛋白|蛋清|蛋液|蛋黄酱/,
+    title: /鸡蛋|鸭蛋|鹅蛋|鹌鹑蛋|蛋黄|蛋白|蛋清/,
+  },
+  dairy: {
+    ingredient: /牛奶|鲜奶|奶粉|奶油|炼乳|黄油|芝士|奶酪|乳酪|酸奶|乳清/,
+    title: /牛奶|鲜奶|奶粉|奶油|炼乳|芝士|奶酪|乳酪|酸奶/,
+  },
+  peanut: {
+    ingredient: /花生|花生酱|花生油|落花生/,
+    title: /花生|落花生/,
+  },
+  shrimp: { ingredient: /虾/, title: /虾/ },
+  crab: { ingredient: /蟹/, title: /蟹/ },
 };
+
+const DIET_RESTRICTION_FAMILIES = {
+  vegetarian: ["pork", "beef", "lamb", "poultry", "seafood"],
+  noPork: ["pork"],
+  noBeef: ["beef"],
+};
+
+const MANUAL_RESTRICTION_FAMILIES = new Map([
+  ["猪肉", "pork"],
+  ["牛肉", "beef"],
+  ["羊肉", "lamb"],
+  ["鸡蛋", "egg"],
+  ["牛奶", "dairy"],
+  ["花生", "peanut"],
+  ["虾", "shrimp"],
+  ["蟹", "crab"],
+]);
 
 const DIET_BOOSTS = {
   highProtein: "highProtein",
@@ -86,24 +126,59 @@ export function isDefaultPantryKey(key) {
   return DEFAULT_PANTRY_KEYS.has(key);
 }
 
-function getBlockedKeys(preferences = {}) {
-  const manualBlocks = [
-    ...(preferences.allergens || []),
-    ...(preferences.restrictions || []),
-  ].flatMap((item) => explodeIngredientKeys(item));
-  const dietBlocks = (preferences.dietType || []).flatMap(
-    (type) => DIET_RESTRICTIONS[type] || []
-  );
-  return Array.from(new Set([...manualBlocks, ...dietBlocks]));
+function getRecipeRestrictionText(recipe) {
+  return {
+    ingredients: [
+      ...(recipe.ingredientKeys || []),
+      ...(recipe.requiredItems || []),
+    ].join("|"),
+    title: String(recipe.title || ""),
+  };
 }
 
-function violatesRestrictions(recipe, preferences = {}) {
-  const blockedKeys = getBlockedKeys(preferences);
-  if (blockedKeys.length === 0) return false;
-  const recipeKeys = recipe.ingredientKeys || [];
-  return blockedKeys.some((blocked) =>
-    recipeKeys.some((key) => key.includes(blocked) || blocked.includes(key))
+function matchesRestrictionFamily(recipeText, familyName) {
+  const family = RESTRICTION_FAMILIES[familyName];
+  if (!family) return false;
+  return (
+    family.ingredient.test(recipeText.ingredients) ||
+    family.title.test(recipeText.title)
   );
+}
+
+export function violatesRestrictions(recipe, preferences = {}) {
+  const recipeText = getRecipeRestrictionText(recipe);
+  const dietFamilies = (preferences.dietType || []).flatMap(
+    (type) => DIET_RESTRICTION_FAMILIES[type] || []
+  );
+
+  if (
+    Array.from(new Set(dietFamilies)).some((family) =>
+      matchesRestrictionFamily(recipeText, family)
+    )
+  ) {
+    return true;
+  }
+
+  const manualBlocks = Array.from(
+    new Set([
+      ...(preferences.allergens || []),
+      ...(preferences.restrictions || []),
+    ])
+  );
+
+  return manualBlocks.some((item) => {
+    const normalizedBlocks = explodeIngredientKeys(item);
+    return normalizedBlocks.some((blocked) => {
+      const familyName = MANUAL_RESTRICTION_FAMILIES.get(blocked);
+      if (familyName) {
+        return matchesRestrictionFamily(recipeText, familyName);
+      }
+      return (
+        recipeText.ingredients.includes(blocked) ||
+        recipeText.title.includes(blocked)
+      );
+    });
+  });
 }
 
 export function getInventoryKeys(ingredients) {

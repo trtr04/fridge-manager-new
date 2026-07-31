@@ -13,13 +13,21 @@ import {
   buildGuestImportCandidate,
   normalizePreferences
 } from './utils/userData';
+import {
+  EMPTY_SYNC_METADATA,
+  finishIngredientSync,
+  markIngredientsDirty,
+  mergeIngredientSnapshots,
+  normalizeSyncMetadata
+} from './utils/syncState';
 import { useLanguage } from './i18n/LanguageContext';
 
 const LS_KEYS = { 
   INGREDIENTS: 'fm_ingredients_v1', 
   PREFERENCES: 'fm_preferences_v1', 
   STEP: 'fm_step_v1', 
-  ADD_STORAGE: 'fm_addStorage_v1' 
+  ADD_STORAGE: 'fm_addStorage_v1',
+  SYNC: 'fm_sync_v1'
 };
 
 const DEFAULT_PREFERENCES = { 
@@ -107,6 +115,25 @@ function getSyncLabel(status, t) {
   return t('☁️ 已同步', '☁️ Synced');
 }
 
+const LOCAL_RESOURCE_SYNC = {
+  load: 'idle',
+  ingredients: 'idle',
+  preferences: 'idle'
+};
+
+function getOverallSyncStatus(resourceSync, user) {
+  if (!user) return 'local';
+  if (resourceSync.load === 'loading') return 'loading';
+  if (Object.values(resourceSync).includes('error')) return 'error';
+  if (
+    ['pending', 'syncing'].includes(resourceSync.ingredients) ||
+    ['pending', 'syncing'].includes(resourceSync.preferences)
+  ) {
+    return 'syncing';
+  }
+  return resourceSync.load === 'synced' ? 'synced' : 'loading';
+}
+
 function enqueueSync(queueRef, task) {
   queueRef.current = queueRef.current
     .catch(() => undefined)
@@ -129,7 +156,8 @@ export default function App() {
   );
   const [addStorage, setAddStorage] = useState(() => loadFromLocalStorage(LS_KEYS.ADD_STORAGE, 'fridge'));
   const [preferencesReturnStep, setPreferencesReturnStep] = useState('ingredients');
-  const [syncStatus, setSyncStatus] = useState('local');
+  const [resourceSync, setResourceSync] = useState(LOCAL_RESOURCE_SYNC);
+  const [syncRetryRevision, setSyncRetryRevision] = useState(0);
   const [guestImportCandidate, setGuestImportCandidate] = useState(null);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState('');
@@ -142,13 +170,76 @@ export default function App() {
   const ingredientSyncRevision = useRef(0);
   const preferenceSyncRevision = useRef(0);
   const authUserId = useRef(null);
+  const syncMetadataRef = useRef({ ...EMPTY_SYNC_METADATA });
+
+  const syncStatus = getOverallSyncStatus(resourceSync, user);
+
+  const saveSyncMetadata = (userId, metadata) => {
+    const normalized = normalizeSyncMetadata(metadata);
+    syncMetadataRef.current = normalized;
+    if (userId) {
+      saveToLocalStorage(
+        getScopedStorageKey(LS_KEYS.SYNC, userId),
+        normalized
+      );
+    }
+    return normalized;
+  };
+
+  const updateIngredients = (update) => {
+    if (authUserId.current) {
+      setResourceSync((current) => ({
+        ...current,
+        ingredients: 'pending'
+      }));
+    }
+    setIngredients((previous) => {
+      const next =
+        typeof update === 'function' ? update(previous) : update;
+      const normalizedNext = ensureIngredientIds(next || []);
+      const userId = authUserId.current;
+      if (userId) {
+        saveSyncMetadata(
+          userId,
+          markIngredientsDirty(
+            syncMetadataRef.current,
+            previous,
+            normalizedNext
+          )
+        );
+      }
+      return normalizedNext;
+    });
+  };
+
+  const updatePreferences = (update) => {
+    if (authUserId.current) {
+      setResourceSync((current) => ({
+        ...current,
+        preferences: 'pending'
+      }));
+    }
+    setPreferences((previous) => {
+      const next = normalizePreferences(
+        typeof update === 'function' ? update(previous) : update
+      );
+      const userId = authUserId.current;
+      if (userId) {
+        saveSyncMetadata(userId, {
+          ...syncMetadataRef.current,
+          preferencesDirty: true
+        });
+      }
+      return next;
+    });
+  };
 
   /* -------- 1. 监听登录状态 -------- */
   useEffect(() => {
     if (!supabase) {
       authUserId.current = null;
       setUser(null);
-      setSyncStatus('local');
+      setResourceSync(LOCAL_RESOURCE_SYNC);
       return undefined;
     }
 
@@ -158,7 +249,15 @@ export default function App() {
 
       if (authUserId.current !== nextUserId) {
         authUserId.current = nextUserId;
-        setSyncStatus(nextUser ? 'loading' : 'local');
+        setResourceSync(
+          nextUser
+            ? {
+                load: 'loading',
+                ingredients: 'idle',
+                preferences: 'idle'
+              }
+            : LOCAL_RESOURCE_SYNC
+        );
       }
       setUser(nextUser);
     };
@@ -187,6 +286,7 @@ export default function App() {
     skipNextPreferencePersist.current = true;
 
     if (!userId) {
+      syncMetadataRef.current = { ...EMPTY_SYNC_METADATA };
       const guestIngredients = ensureIngredientIds(
         loadScopedData(LS_KEYS.INGREDIENTS, null, [], true)
       );
@@ -200,10 +300,14 @@ export default function App() {
       );
       setIngredients(guestIngredients);
       setPreferences(guestPreferences);
-      setSyncStatus('local');
+      setResourceSync(LOCAL_RESOURCE_SYNC);
       return undefined;
     }
 
+    const syncMetadata = normalizeSyncMetadata(
+      loadScopedData(LS_KEYS.SYNC, userId, EMPTY_SYNC_METADATA)
+    );
+    syncMetadataRef.current = syncMetadata;
     const cachedIngredients = ensureIngredientIds(
       loadScopedData(LS_KEYS.INGREDIENTS, userId, [])
     );
@@ -216,80 +320,103 @@ export default function App() {
     );
     setIngredients(cachedIngredients);
     setPreferences(cachedPreferences);
-    setSyncStatus('loading');
+    setResourceSync({
+      load: 'loading',
+      ingredients: syncMetadata.ingredientsDirty ? 'idle' : 'synced',
+      preferences: syncMetadata.preferencesDirty ? 'idle' : 'synced'
+    });
 
     const fetchCloudData = async () => {
-      const [ingredientsResult, preferencesResult] = await Promise.all([
-        supabase
-          .from('ingredients')
-          .select('*')
-          .eq('user_id', userId),
-        supabase
-          .from('preferences')
-          .select('*')
-          .eq('id', userId)
-          .maybeSingle()
-      ]);
+      try {
+        const [ingredientsResult, preferencesResult] = await Promise.all([
+          supabase
+            .from('ingredients')
+            .select('*')
+            .eq('user_id', userId),
+          supabase
+            .from('preferences')
+            .select('*')
+            .eq('id', userId)
+            .maybeSingle()
+        ]);
 
-      if (cancelled) return;
+        if (cancelled) return;
 
-      if (ingredientsResult.error || preferencesResult.error) {
-        console.error(
-          'Cloud load failed:',
-          ingredientsResult.error || preferencesResult.error
+        if (ingredientsResult.error || preferencesResult.error) {
+          console.error(
+            'Cloud load failed:',
+            ingredientsResult.error || preferencesResult.error
+          );
+          setResourceSync((current) => ({ ...current, load: 'error' }));
+          return;
+        }
+
+        const cloudIngredients = ensureIngredientIds(
+          (ingredientsResult.data || []).map(mapFromDB)
         );
-        setSyncStatus('error');
-        return;
+        const cloudPreferences = preferencesResult.data
+          ? mapPreferencesFromDB(preferencesResult.data)
+          : { ...DEFAULT_PREFERENCES };
+        const mergedIngredients = syncMetadata.ingredientsDirty
+          ? mergeIngredientSnapshots({
+              cloudIngredients,
+              localIngredients: cachedIngredients,
+              deletedIngredientIds: syncMetadata.deletedIngredientIds
+            })
+          : cloudIngredients;
+        const mergedPreferences = syncMetadata.preferencesDirty
+          ? cachedPreferences
+          : cloudPreferences;
+        const guestIngredients = ensureIngredientIds(
+          loadScopedData(LS_KEYS.INGREDIENTS, null, [], true)
+        );
+        const guestPreferences = normalizePreferences(
+          loadScopedData(
+            LS_KEYS.PREFERENCES,
+            null,
+            DEFAULT_PREFERENCES,
+            true
+          )
+        );
+        const guestCandidate = buildGuestImportCandidate({
+          userId,
+          cloudIngredients: mergedIngredients,
+          cloudPreferences: mergedPreferences,
+          guestIngredients,
+          guestPreferences
+        });
+
+        skipNextIngredientPersist.current = !syncMetadata.ingredientsDirty;
+        skipNextPreferencePersist.current = !syncMetadata.preferencesDirty;
+        cloudReadyForUser.current = userId;
+        setIngredients(mergedIngredients);
+        setPreferences(mergedPreferences);
+        saveToLocalStorage(
+          getScopedStorageKey(LS_KEYS.INGREDIENTS, userId),
+          mergedIngredients
+        );
+        saveToLocalStorage(
+          getScopedStorageKey(LS_KEYS.PREFERENCES, userId),
+          mergedPreferences
+        );
+        setResourceSync({
+          load: 'synced',
+          ingredients: syncMetadata.ingredientsDirty ? 'idle' : 'synced',
+          preferences: syncMetadata.preferencesDirty ? 'idle' : 'synced'
+        });
+        setGuestImportCandidate(guestCandidate);
+      } catch (error) {
+        if (cancelled) return;
+        console.error('Cloud load failed:', error);
+        setResourceSync((current) => ({ ...current, load: 'error' }));
       }
-
-      const cloudIngredients = ensureIngredientIds(
-        (ingredientsResult.data || []).map(mapFromDB)
-      );
-      const cloudPreferences = preferencesResult.data
-        ? mapPreferencesFromDB(preferencesResult.data)
-        : { ...DEFAULT_PREFERENCES };
-      const guestIngredients = ensureIngredientIds(
-        loadScopedData(LS_KEYS.INGREDIENTS, null, [], true)
-      );
-      const guestPreferences = normalizePreferences(
-        loadScopedData(
-          LS_KEYS.PREFERENCES,
-          null,
-          DEFAULT_PREFERENCES,
-          true
-        )
-      );
-      const guestCandidate = buildGuestImportCandidate({
-        userId,
-        cloudIngredients,
-        cloudPreferences,
-        guestIngredients,
-        guestPreferences
-      });
-
-      skipNextIngredientPersist.current = true;
-      skipNextPreferencePersist.current = true;
-      setIngredients(cloudIngredients);
-      setPreferences(cloudPreferences);
-      saveToLocalStorage(
-        getScopedStorageKey(LS_KEYS.INGREDIENTS, userId),
-        cloudIngredients
-      );
-      saveToLocalStorage(
-        getScopedStorageKey(LS_KEYS.PREFERENCES, userId),
-        cloudPreferences
-      );
-      cloudReadyForUser.current = userId;
-      setSyncStatus('synced');
-
-      setGuestImportCandidate(guestCandidate);
     };
 
     fetchCloudData();
     return () => {
       cancelled = true;
     };
-  }, [user?.id]);
+  }, [user?.id, syncRetryRevision]);
 
   /* -------- 3. 自动跳关：登录直接进主页 -------- */
   useEffect(() => {
@@ -331,26 +458,48 @@ export default function App() {
     const syncPrefs = async () => {
       if (!isCurrentSync()) return;
 
-      setSyncStatus('syncing');
-      const { error } = await supabase.from('preferences').upsert({
-        id: userId,
-        tastes: preferencesSnapshot.tastes,
-        quick_meals: preferencesSnapshot.quickMeals,
-        allergens: preferencesSnapshot.allergens,
-        diet_type: preferencesSnapshot.dietType,
-        restrictions: preferencesSnapshot.restrictions,
-        period_restrictions: preferencesSnapshot.periodRestrictions,
-        consider_nutrition: preferencesSnapshot.considerNutrition,
-        updated_at: new Date().toISOString()
-      });
+      setResourceSync((current) => ({
+        ...current,
+        preferences: 'syncing'
+      }));
+      try {
+        const { error } = await supabase.from('preferences').upsert({
+          id: userId,
+          tastes: preferencesSnapshot.tastes,
+          quick_meals: preferencesSnapshot.quickMeals,
+          allergens: preferencesSnapshot.allergens,
+          diet_type: preferencesSnapshot.dietType,
+          restrictions: preferencesSnapshot.restrictions,
+          period_restrictions: preferencesSnapshot.periodRestrictions,
+          consider_nutrition: preferencesSnapshot.considerNutrition,
+          updated_at: new Date().toISOString()
+        });
 
-      if (!isCurrentSync()) return;
+        if (!isCurrentSync()) return;
 
-      if (error) {
+        if (error) {
+          console.error('Preference sync failed:', error);
+          setResourceSync((current) => ({
+            ...current,
+            preferences: 'error'
+          }));
+        } else {
+          saveSyncMetadata(userId, {
+            ...syncMetadataRef.current,
+            preferencesDirty: false
+          });
+          setResourceSync((current) => ({
+            ...current,
+            preferences: 'synced'
+          }));
+        }
+      } catch (error) {
+        if (!isCurrentSync()) return;
         console.error('Preference sync failed:', error);
-        setSyncStatus('error');
-      } else {
-        setSyncStatus('synced');
+        setResourceSync((current) => ({
+          ...current,
+          preferences: 'error'
+        }));
       }
     };
 
@@ -358,7 +507,7 @@ export default function App() {
       enqueueSync(preferenceSyncQueue, syncPrefs);
     }, 1000);
     return () => clearTimeout(timer);
-  }, [preferences, user?.id]);
+  }, [preferences, user?.id, syncRetryRevision]);
 
   useEffect(() => {
     const revision = ++ingredientSyncRevision.current;
@@ -377,6 +526,9 @@ export default function App() {
     if (!userId || cloudReadyForUser.current !== userId) return undefined;
 
     const ingredientsSnapshot = ingredients.map((item) => ({ ...item }));
+    const deletedIdsSnapshot = [
+      ...syncMetadataRef.current.deletedIngredientIds
+    ];
     const isCurrentSync = () =>
       revision === ingredientSyncRevision.current &&
       cloudReadyForUser.current === userId;
@@ -384,84 +536,77 @@ export default function App() {
     const syncIngredients = async () => {
       if (!isCurrentSync()) return;
 
-      setSyncStatus('syncing');
+      setResourceSync((current) => ({
+        ...current,
+        ingredients: 'syncing'
+      }));
 
-      if (ingredientsSnapshot.length === 0) {
-        const { error } = await supabase
-          .from('ingredients')
-          .delete()
-          .eq('user_id', userId);
+      try {
+        if (ingredientsSnapshot.length > 0) {
+          const ingredientsForDB = ingredientsSnapshot.map((item) =>
+            mapToDB(item, userId)
+          );
+          const { error: upsertError } = await supabase
+            .from('ingredients')
+            .upsert(ingredientsForDB, { onConflict: 'id' });
 
-        if (!isCurrentSync()) return;
+          if (!isCurrentSync()) return;
 
-        if (error) {
-          console.error('Ingredient clear failed:', error);
-          setSyncStatus('error');
-        } else {
-          setSyncStatus('synced');
+          if (upsertError) {
+            console.error('Ingredient upsert failed:', upsertError);
+            setResourceSync((current) => ({
+              ...current,
+              ingredients: 'error'
+            }));
+            return;
+          }
         }
-        return;
-      }
 
-      const ingredientsForDB = ingredientsSnapshot.map((item) =>
-        mapToDB(item, userId)
-      );
-      const { error: upsertError } = await supabase
-        .from('ingredients')
-        .upsert(ingredientsForDB, { onConflict: 'id' });
+        if (deletedIdsSnapshot.length > 0) {
+          const { error: deleteError } = await supabase
+            .from('ingredients')
+            .delete()
+            .eq('user_id', userId)
+            .in('id', deletedIdsSnapshot);
 
-      if (!isCurrentSync()) return;
+          if (!isCurrentSync()) return;
 
-      if (upsertError) {
-        console.error('Ingredient upsert failed:', upsertError);
-        setSyncStatus('error');
-        return;
-      }
-
-      const { data: cloudRows, error: listError } = await supabase
-        .from('ingredients')
-        .select('id')
-        .eq('user_id', userId);
-
-      if (!isCurrentSync()) return;
-
-      if (listError) {
-        console.error('Ingredient cleanup check failed:', listError);
-        setSyncStatus('error');
-        return;
-      }
-
-      const currentIds = new Set(
-        ingredientsSnapshot.map((item) => item.id)
-      );
-      const staleIds = (cloudRows || [])
-        .map((row) => row.id)
-        .filter((id) => !currentIds.has(id));
-
-      if (staleIds.length > 0) {
-        const { error: deleteError } = await supabase
-          .from('ingredients')
-          .delete()
-          .eq('user_id', userId)
-          .in('id', staleIds);
-
-        if (!isCurrentSync()) return;
-
-        if (deleteError) {
-          console.error('Ingredient cleanup failed:', deleteError);
-          setSyncStatus('error');
-          return;
+          if (deleteError) {
+            console.error('Ingredient delete failed:', deleteError);
+            setResourceSync((current) => ({
+              ...current,
+              ingredients: 'error'
+            }));
+            return;
+          }
         }
-      }
 
-      setSyncStatus('synced');
+        saveSyncMetadata(
+          userId,
+          finishIngredientSync(
+            syncMetadataRef.current,
+            deletedIdsSnapshot
+          )
+        );
+        setResourceSync((current) => ({
+          ...current,
+          ingredients: 'synced'
+        }));
+      } catch (error) {
+        if (!isCurrentSync()) return;
+        console.error('Ingredient sync failed:', error);
+        setResourceSync((current) => ({
+          ...current,
+          ingredients: 'error'
+        }));
+      }
     };
 
     const timer = setTimeout(() => {
       enqueueSync(ingredientSyncQueue, syncIngredients);
     }, 800);
     return () => clearTimeout(timer);
-  }, [ingredients, user?.id]);
+  }, [ingredients, user?.id, syncRetryRevision]);
 
   useEffect(() => {
     saveToLocalStorage(LS_KEYS.STEP, step);
@@ -481,7 +626,7 @@ export default function App() {
         )
       )
     ) {
-      setIngredients([]);
+      updateIngredients([]);
     }
   };
 
@@ -505,12 +650,12 @@ export default function App() {
     }
 
     if (guestImportCandidate.ingredients) {
-      setIngredients(
+      updateIngredients(
         ensureIngredientIds(guestImportCandidate.ingredients)
       );
     }
     if (guestImportCandidate.preferences) {
-      setPreferences(
+      updatePreferences(
         normalizePreferences(guestImportCandidate.preferences)
       );
     }
@@ -541,7 +686,7 @@ export default function App() {
       preferenceSyncRevision.current += 1;
       setGuestImportCandidate(null);
       setUser(null);
-      setSyncStatus('local');
+      setResourceSync(LOCAL_RESOURCE_SYNC);
       setStep('landing');
     } catch (error) {
       setSignOutError(
@@ -645,6 +790,15 @@ export default function App() {
         >
           <span>{getSyncLabel(syncStatus, t)}</span>
           <div className="flex items-center gap-3">
+            {syncStatus === 'error' && (
+              <button
+                type="button"
+                onClick={() => setSyncRetryRevision((value) => value + 1)}
+                className="rounded-md border border-current px-2 py-1 font-medium"
+              >
+                {t('重试同步', 'Retry sync')}
+              </button>
+            )}
             <span>👤 {user.email}</span>
             <button
               type="button"
@@ -693,7 +847,7 @@ export default function App() {
       {!isInitialCloudLoad && step === 'preferences' && (
         <PreferencesPage 
           preferences={preferences} 
-          setPreferences={setPreferences} 
+          setPreferences={updatePreferences}
           onNext={() => setStep(preferencesReturnStep)} 
           onSkip={() => setStep(preferencesReturnStep)} 
         />
@@ -703,7 +857,7 @@ export default function App() {
         <IngredientsPage
           key={user?.id || 'guest'}
           ingredients={ingredients}
-          setIngredients={setIngredients}
+          setIngredients={updateIngredients}
           user={user}
           addStorage={addStorage}
           setAddStorage={setAddStorage}
@@ -715,7 +869,7 @@ export default function App() {
       {!isInitialCloudLoad && step === 'main' && (
         <MainPage 
           ingredients={ingredients} 
-          setIngredients={setIngredients} 
+          setIngredients={updateIngredients}
           preferences={preferences} 
           onBack={() => goAddIngredients('fridge')} 
           onClearFridge={clearFridge} 
