@@ -1,3 +1,5 @@
+import { addDaysToDate } from './dateUtils.js';
+
 const ALLOWED_STORAGE = new Set([
   'fridge',
   'freezer',
@@ -82,7 +84,8 @@ export function validateIngredientDraft(draft, language = 'zh') {
   if (
     typeof purchaseDate !== 'string' ||
     !/^\d{4}-\d{2}-\d{2}$/.test(purchaseDate) ||
-    Number.isNaN(Date.parse(`${purchaseDate}T00:00:00Z`))
+    // Round-trip rejects impossible dates such as 2026-02-31.
+    addDaysToDate(purchaseDate, 0) !== purchaseDate
   ) {
     return {
       error: message(

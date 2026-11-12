@@ -2,25 +2,17 @@
 import React, { useMemo } from "react";
 import { Clock, Plus } from "lucide-react";
 import IngredientCard from "./IngredientCard";
-import { getDaysLeft, getTodayDate, isNonExpiringIngredient } from "../utils/dateUtils";
-import { createIngredientId } from "../utils/ingredientIds";
+import { getDaysLeft, isNonExpiringIngredient } from "../utils/dateUtils";
+import {
+  addStock,
+  consumeFromBatch,
+  getBatchExpiresAt,
+  getBatchKey,
+  normStorage,
+  normalizeIngredient,
+} from "../utils/inventory";
 import { useDroppable } from "@dnd-kit/core";
 import { useLanguage } from "../i18n/LanguageContext";
-
-function calcExpiresAt(purchaseDate, shelfLife, storage, name) {
-  if (isNonExpiringIngredient(storage, name)) return "";
-  if (!purchaseDate || typeof shelfLife !== "number") return "";
-  const d = new Date(purchaseDate);
-  if (Number.isNaN(d.getTime())) return "";
-  d.setDate(d.getDate() + shelfLife);
-  return d.toISOString().split("T")[0];
-}
-
-function normStorage(s) {
-  if (!s) return "fridge";
-  if (s === "room") return "pantry";
-  return s;
-}
 
 function FridgePanel({
   title = "我的冰箱",
@@ -44,72 +36,25 @@ function FridgePanel({
   const aggregated = useMemo(() => {
     const map = new Map();
 
-    for (const it of filteredIngredients) {
-      const name = it.name;
-      const storage = normStorage(it.storage || storageFilter || "fridge");
-      const unit = it.unit || "";
-      const shelfLife = typeof it.shelfLife === "number" ? it.shelfLife : 7;
+    for (const raw of filteredIngredients) {
+      const it = normalizeIngredient(raw);
+      const key = getBatchKey(it);
+      const expiresAt = getBatchExpiresAt(it);
+      const prev = map.get(key);
 
-      const expiresAt = calcExpiresAt(
-        it.purchaseDate,
-        shelfLife,
-        storage,
-        name
-      );
-
-      const key =
-        isNonExpiringIngredient(storage, name)
-          ? `${name}__${storage}__${unit}`
-          : `${name}__${storage}__${unit}__${expiresAt}`;
-
-      if (!map.has(key)) {
-        map.set(key, {
-          ...it,
-          storage,
-          unit,
-          shelfLife,
-          _expiresAt: expiresAt,
-          _aggKey: key,
-        });
-      } else {
-        const prev = map.get(key);
-        const amount = (Number(prev.amount) || 0) + (Number(it.amount) || 0);
-
-        if (!isNonExpiringIngredient(storage, name)) {
-          const prevDays = getDaysLeft(
-            prev.purchaseDate,
-            prev.shelfLife,
-            prev.storage,
-            prev.name
-          );
-          const itDays = getDaysLeft(
-            it.purchaseDate,
-            it.shelfLife,
-            it.storage,
-            it.name
-          );
-          const pick = itDays < prevDays ? it : prev;
-          map.set(key, {
-            ...pick,
-            amount,
-            storage,
-            unit,
-            shelfLife,
-            _expiresAt: expiresAt,
-            _aggKey: key,
-          });
-        } else {
-          map.set(key, {
-            ...prev,
-            amount,
-            storage,
-            unit,
-            shelfLife: prev.shelfLife ?? 9999,
-            _expiresAt: "",
-            _aggKey: key,
-          });
-        }
+      if (!prev) {
+        map.set(key, { ...it, _expiresAt: expiresAt, _aggKey: key });
+        continue;
       }
+
+      const amount = (Number(prev.amount) || 0) + (Number(it.amount) || 0);
+      // Show the oldest purchase in the group (it is the one used first).
+      const pick =
+        !isNonExpiringIngredient(it.storage, it.name) &&
+        (it.purchaseDate || "") < (prev.purchaseDate || "")
+          ? it
+          : prev;
+      map.set(key, { ...pick, amount, _expiresAt: expiresAt, _aggKey: key });
     }
 
     const arr = Array.from(map.values());
@@ -137,55 +82,24 @@ function FridgePanel({
   }, [filteredIngredients, storageFilter]);
 
   const updateAmount = (aggItem, delta) => {
-    const name = aggItem.name;
-    const storage = normStorage(aggItem.storage || storageFilter || "fridge");
-    const unit = aggItem.unit || "个";
-    const shelfLife = typeof aggItem.shelfLife === "number" ? aggItem.shelfLife : 7;
-    const expiresAt =
-      aggItem._expiresAt ||
-      calcExpiresAt(aggItem.purchaseDate, shelfLife, storage, name);
+    const batchKey = aggItem._aggKey || getBatchKey(aggItem);
 
     setIngredients((prev) => {
-      const list = [...(prev || [])];
+      const list = prev || [];
 
       if (delta > 0) {
-        list.push({
-          id: createIngredientId(),
-          name,
+        // A "+" is a new purchase today with the same shelf life.
+        return addStock(list, {
+          name: aggItem.name,
           amount: 1,
-          unit,
-          purchaseDate: getTodayDate(),
-          storage,
-          shelfLife: storage === "freezer" ? 9999 : shelfLife,
-          baseShelfLife: aggItem.baseShelfLife,
+          unit: aggItem.unit,
+          storage: normStorage(aggItem.storage || storageFilter),
+          shelfLife: aggItem.shelfLife,
+          category: aggItem.category,
         });
-        return list;
       }
 
-      const candidates = list
-        .map((it, idx) => ({ it, idx }))
-        .filter(({ it }) => {
-          const itStorage = normStorage(it.storage || "fridge");
-          const itUnit = it.unit || "";
-          if (it.name !== name) return false;
-          if (itStorage !== storage) return false;
-          if (itUnit !== (unit || "")) return false;
-
-          if (isNonExpiringIngredient(storage, name)) return true;
-          const itShelf = typeof it.shelfLife === "number" ? it.shelfLife : 7;
-          const itExp = calcExpiresAt(it.purchaseDate, itShelf, itStorage, it.name);
-          return itExp === expiresAt;
-        });
-
-      if (candidates.length === 0) return list;
-
-      const { it: target, idx } = candidates[0];
-      const newAmount = (Number(target.amount) || 0) - 1;
-
-      if (newAmount <= 0) list.splice(idx, 1);
-      else list[idx] = { ...target, amount: newAmount };
-
-      return list;
+      return consumeFromBatch(list, batchKey, 1).list;
     });
   };
 

@@ -9,40 +9,25 @@ import {
   formatDaysSincePurchase,
   isNonExpiringIngredient,
 } from "../utils/dateUtils";
+import { getBatchKey, normalizeIngredient } from "../utils/inventory";
 import { useLanguage } from "../i18n/LanguageContext";
 import {
   translateIngredientName,
   translateUnit
 } from "../i18n/contentTranslations";
 
-/**
- * 计算过期日期的辅助函数
- */
-function calcExpiresAt(purchaseDate, shelfLife, storage, name) {
-  if (isNonExpiringIngredient(storage, name)) return "";
-  if (!purchaseDate || typeof shelfLife !== "number") return "";
-  const d = new Date(purchaseDate);
-  if (Number.isNaN(d.getTime())) return "";
-  d.setDate(d.getDate() + shelfLife);
-  return d.toISOString().split("T")[0];
-}
-
 function IngredientCard({ item, onUpdateAmount, isOverlay = false }) {
   const { t, language } = useLanguage();
-  const name = item?.name ?? "";
-  const unit = item?.unit ?? "个";
-  const storageRaw = item?.storage ?? "fridge";
-  const storage = storageRaw === "room" ? "pantry" : storageRaw;
-  const amount = Number(item?.amount ?? 0);
-  const shelfLife = Number(item?.shelfLife ?? 0);
-  const purchaseDate = item?.purchaseDate ?? "";
+  const normalized = normalizeIngredient(item);
+  const name = normalized.name ?? "";
+  const { unit, storage, amount, shelfLife, purchaseDate } = normalized;
 
   // 计算剩余天数和状态颜色
   const daysLeft = getDaysLeft(purchaseDate, shelfLife, storage, name);
   const statusColor = getStatusColor(daysLeft, storage);
 
-  // 获取过期日期（用于拖拽数据的唯一标识）
-  const expiresAt = item?._expiresAt || calcExpiresAt(purchaseDate, shelfLife, storage, name);
+  // 批次标识（同名、同区域、同单位、同到期日的食材合并为一张卡片）
+  const batchKey = item?._aggKey || getBatchKey(normalized);
 
   // 获取存储区域图标
   const getStorageIcon = (s) => {
@@ -82,17 +67,15 @@ function IngredientCard({ item, onUpdateAmount, isOverlay = false }) {
     return t(`剩余 ${days} 天`, `${days} days left`);
   };
 
-  const dragId = `${name}__${storage}__${unit}__${expiresAt}`;
-
   const draggable = !isOverlay
     ? useDraggable({
-        id: dragId,
+        id: batchKey,
         data: {
+          batchKey,
           name,
           unit,
           fromStorage: storage,
           amount,
-          expiresAt,
         },
       })
     : null;

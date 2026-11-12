@@ -15,7 +15,10 @@ import {
 } from './utils/userData';
 import {
   EMPTY_SYNC_METADATA,
+  buildFingerprintMap,
   finishIngredientSync,
+  getRowsToUpload,
+  ingredientFingerprint,
   markIngredientsDirty,
   mergeIngredientSnapshots,
   normalizeSyncMetadata
@@ -171,6 +174,11 @@ export default function App() {
   const preferenceSyncRevision = useRef(0);
   const authUserId = useRef(null);
   const syncMetadataRef = useRef({ ...EMPTY_SYNC_METADATA });
+  // Fingerprint of every row as it currently exists in the cloud, so a sync
+  // uploads only rows that changed instead of the whole list.
+  const cloudFingerprints = useRef(new Map());
+  const latestIngredients = useRef(ingredients);
+  latestIngredients.current = ingredients;
 
   const syncStatus = getOverallSyncStatus(resourceSync, user);
 
@@ -279,6 +287,7 @@ export default function App() {
     let cancelled = false;
 
     cloudReadyForUser.current = null;
+    cloudFingerprints.current = new Map();
     setGuestImportCandidate(null);
     ingredientSyncRevision.current += 1;
     preferenceSyncRevision.current += 1;
@@ -361,7 +370,8 @@ export default function App() {
           ? mergeIngredientSnapshots({
               cloudIngredients,
               localIngredients: cachedIngredients,
-              deletedIngredientIds: syncMetadata.deletedIngredientIds
+              deletedIngredientIds: syncMetadata.deletedIngredientIds,
+              dirtyIngredientIds: syncMetadata.dirtyIngredientIds
             })
           : cloudIngredients;
         const mergedPreferences = syncMetadata.preferencesDirty
@@ -386,6 +396,7 @@ export default function App() {
           guestPreferences
         });
 
+        cloudFingerprints.current = buildFingerprintMap(cloudIngredients);
         skipNextIngredientPersist.current = !syncMetadata.ingredientsDirty;
         skipNextPreferencePersist.current = !syncMetadata.preferencesDirty;
         cloudReadyForUser.current = userId;
@@ -542,13 +553,18 @@ export default function App() {
       }));
 
       try {
-        if (ingredientsSnapshot.length > 0) {
-          const ingredientsForDB = ingredientsSnapshot.map((item) =>
-            mapToDB(item, userId)
-          );
+        const changedRows = getRowsToUpload(
+          ingredientsSnapshot,
+          cloudFingerprints.current
+        );
+
+        if (changedRows.length > 0) {
           const { error: upsertError } = await supabase
             .from('ingredients')
-            .upsert(ingredientsForDB, { onConflict: 'id' });
+            .upsert(
+              changedRows.map((item) => mapToDB(item, userId)),
+              { onConflict: 'id' }
+            );
 
           if (!isCurrentSync()) return;
 
@@ -559,6 +575,13 @@ export default function App() {
               ingredients: 'error'
             }));
             return;
+          }
+
+          for (const item of changedRows) {
+            cloudFingerprints.current.set(
+              item.id,
+              ingredientFingerprint(item)
+            );
           }
         }
 
@@ -579,13 +602,22 @@ export default function App() {
             }));
             return;
           }
+
+          for (const id of deletedIdsSnapshot) {
+            cloudFingerprints.current.delete(id);
+          }
         }
 
         saveSyncMetadata(
           userId,
           finishIngredientSync(
             syncMetadataRef.current,
-            deletedIdsSnapshot
+            deletedIdsSnapshot,
+            // Rows edited while this upload was in flight stay pending.
+            getRowsToUpload(
+              latestIngredients.current,
+              cloudFingerprints.current
+            ).map((item) => item.id)
           )
         );
         setResourceSync((current) => ({
