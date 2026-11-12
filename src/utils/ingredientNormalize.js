@@ -47,7 +47,8 @@ const ALIASES = new Map([
   ["菜花", "花菜"],
   ["猪肉末", "肉末"],
   ["猪肉馅", "肉末"],
-  ["牛肉末", "肉末"],
+  // Beef mince stays separate: "肉末" in recipes means pork mince.
+  ["牛肉馅", "牛肉末"],
   ["鸡蛋", "鸡蛋"],
   ["蛋", "鸡蛋"],
   ["番茄酱", "番茄酱"],

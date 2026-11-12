@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { ChefHat } from "lucide-react";
-import howToCookRecipes from "../data/howToCookRecipes.json";
 import {
   DEFAULT_RECOMMENDATION_THRESHOLD,
   getInventoryKeys,
@@ -45,6 +44,21 @@ const TAG_LABELS = {
   slow: ["慢做", "Slow"],
 };
 
+// The recipe catalog is large (~800 KB), so it is fetched the first time
+// someone asks for recommendations instead of on every page load.
+let recipeCatalogPromise = null;
+function loadRecipeCatalog() {
+  if (!recipeCatalogPromise) {
+    recipeCatalogPromise = import("../data/howToCookRecipes.json")
+      .then((module) => module.default)
+      .catch((error) => {
+        recipeCatalogPromise = null;
+        throw error;
+      });
+  }
+  return recipeCatalogPromise;
+}
+
 function formatPercent(value) {
   return `${Math.round(value * 100)}%`;
 }
@@ -75,6 +89,8 @@ function RecipePanel({ ingredients, preferences }) {
   });
   const [recipes, setRecipes] = useState([]);
   const [hasGenerated, setHasGenerated] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [englishCatalog, setEnglishCatalog] = useState(null);
 
   useEffect(() => {
@@ -104,17 +120,27 @@ function RecipePanel({ ingredients, preferences }) {
     showPlate: sessionPrefs.showPlate,
   };
 
-  const generateRecipes = () => {
-    const recommended = recommendRecipes({
-      recipes: howToCookRecipes,
-      ingredients,
-      preferences: effectivePreferences,
-      threshold,
-      limit: 20,
-    });
+  const generateRecipes = async () => {
+    setIsGenerating(true);
+    setLoadError(false);
+    try {
+      const recipeCatalog = await loadRecipeCatalog();
+      const recommended = recommendRecipes({
+        recipes: recipeCatalog,
+        ingredients,
+        preferences: effectivePreferences,
+        threshold,
+        limit: 20,
+      });
 
-    setRecipes(recommended);
-    setHasGenerated(true);
+      setRecipes(recommended);
+      setHasGenerated(true);
+    } catch (error) {
+      console.error("Recipe data failed to load:", error);
+      setLoadError(true);
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   return (
@@ -284,14 +310,28 @@ function RecipePanel({ ingredients, preferences }) {
             </div>
           )}
 
+          {loadError && (
+            <div
+              role="alert"
+              className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"
+            >
+              {t(
+                "菜谱数据加载失败，请检查网络后重试。",
+                "Recipe data failed to load. Check your connection and try again."
+              )}
+            </div>
+          )}
+
           <button
             onClick={generateRecipes}
-            disabled={!ingredients || ingredients.length === 0}
+            disabled={!ingredients || ingredients.length === 0 || isGenerating}
             className="w-full bg-green-600 text-white py-4 rounded-lg font-semibold hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition"
             type="button"
           >
             {!ingredients || ingredients.length === 0
               ? t("请先添加食材", "Add ingredients first")
+              : isGenerating
+              ? t("正在加载菜谱…", "Loading recipes…")
               : t("🎲 生成菜谱推荐", "🎲 Generate recommendations")}
           </button>
         </div>

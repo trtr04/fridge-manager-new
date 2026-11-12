@@ -88,3 +88,20 @@ test('dataset scan has no obvious diet restriction leaks', () => {
   assert.deepEqual(porkLeaks.map((item) => item.title), []);
   assert.deepEqual(beefLeaks.map((item) => item.title), []);
 });
+
+test('beef mince is not pork mince', async () => {
+  const { explodeIngredientKeys } = await import('../src/utils/ingredientNormalize.js');
+  assert.deepEqual(explodeIngredientKeys('牛肉末'), ['牛肉末']);
+  assert.deepEqual(explodeIngredientKeys('猪肉末'), ['肉末']);
+  const beefOnly = {
+    title: '牛肉末炒饭',
+    ingredientKeys: ['牛肉末', '米饭'],
+    requiredItems: ['牛肉末', '米饭'],
+  };
+  assert.equal(violatesRestrictions(beefOnly, { dietType: ['noPork'] }), false);
+  assert.equal(violatesRestrictions(beefOnly, { dietType: ['noBeef'] }), true);
+  assert.equal(
+    violatesRestrictions(recipe('冬瓜酿肉'), { dietType: ['noPork'] }),
+    true
+  );
+});

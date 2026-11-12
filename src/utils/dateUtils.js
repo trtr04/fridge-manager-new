@@ -1,6 +1,47 @@
-export const getTodayDate = () => {
-  return new Date().toISOString().split('T')[0];
-};
+// All dates in the app are calendar dates ("YYYY-MM-DD") in the user's local
+// time zone. Never parse them with `new Date("YYYY-MM-DD")`: that is UTC
+// midnight, which is the previous evening anywhere west of Greenwich and made
+// "bought today" show as "bought yesterday" in the US.
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Shelf life used as a "never expires" sentinel by older versions of the app.
+export const NON_EXPIRING_DAYS = 9999;
+
+const pad = (value) => String(value).padStart(2, '0');
+
+export const formatLocalDate = (date) =>
+  `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+
+export const getTodayDate = (now = new Date()) => formatLocalDate(now);
+
+export function parseLocalDate(value) {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value.trim());
+  if (!match) return null;
+  const date = new Date(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3])
+  );
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+// Whole-day index of a local calendar date. Using Date.UTC on the local
+// components keeps the difference exact across daylight-saving changes.
+function dayNumber(date) {
+  return Math.round(
+    Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / DAY_MS
+  );
+}
+
+export function addDaysToDate(dateString, days) {
+  const date = parseLocalDate(dateString);
+  const amount = Number(days);
+  if (!date || !Number.isFinite(amount)) return '';
+  date.setDate(date.getDate() + amount);
+  return formatLocalDate(date);
+}
 
 const NON_EXPIRING_NAMES = new Set([
   '油',
@@ -22,26 +63,43 @@ export const isNonExpiringIngredient = (storage = 'fridge', name = '') => {
   return s === 'freezer' || s === 'condiment' || NON_EXPIRING_NAMES.has(n);
 };
 
-// freezer / condiment / oil：视为长期保存，不参与倒计时
-export const getDaysLeft = (purchaseDate, shelfLife, storage = 'fridge', name = '') => {
-  const s = storage || 'fridge';
-  if (isNonExpiringIngredient(s, name)) return 9999;
+// Expiry date as "YYYY-MM-DD", or "" for long-term items.
+export const getExpiresAt = (
+  purchaseDate,
+  shelfLife,
+  storage = 'fridge',
+  name = ''
+) => {
+  if (isNonExpiringIngredient(storage, name)) return '';
+  return addDaysToDate(purchaseDate, shelfLife);
+};
 
-  const purchase = new Date(purchaseDate);
-  const today = new Date();
+// freezer / condiment / oil：视为长期保存，不参与倒计时
+// 0 = expires today, negative = already expired.
+export const getDaysLeft = (
+  purchaseDate,
+  shelfLife,
+  storage = 'fridge',
+  name = '',
+  now = new Date()
+) => {
+  if (isNonExpiringIngredient(storage || 'fridge', name)) {
+    return NON_EXPIRING_DAYS;
+  }
 
   const life = Number(shelfLife) || 0;
-  const expiry = purchase.getTime() + life * 24 * 60 * 60 * 1000;
+  const purchase = parseLocalDate(purchaseDate);
+  // A missing purchase date is treated as "bought today".
+  if (!purchase) return life;
 
-  const diff = Math.ceil((expiry - today.getTime()) / (1000 * 60 * 60 * 24));
-  return diff;
+  return dayNumber(purchase) + life - dayNumber(now);
 };
 
 export const getStatusColor = (daysLeft, storage = 'fridge') => {
   const s = storage || 'fridge';
 
   // 长期保存：蓝色系
-  if (s === 'freezer' || s === 'condiment' || daysLeft >= 9999) {
+  if (s === 'freezer' || s === 'condiment' || daysLeft >= NON_EXPIRING_DAYS) {
     return 'bg-blue-50 border-blue-200 text-blue-800';
   }
 
@@ -51,32 +109,17 @@ export const getStatusColor = (daysLeft, storage = 'fridge') => {
 };
 
 /**
- * ✨ 计算从购买日期到今天过了几天
- * @param {string} dateString - ISO 格式日期字符串 (YYYY-MM-DD)
- * @returns {number} - 购买天数（0 表示今天购买）
+ * 计算从购买日期到今天过了几天（0 表示今天购买）
+ * @param {string} dateString - YYYY-MM-DD
  */
-export const getDaysSincePurchase = (dateString) => {
-  if (!dateString) return 0;
-  
-  const purchaseDate = new Date(dateString);
-  if (isNaN(purchaseDate.getTime())) return 0;
-  
-  const today = new Date();
-  
-  // 重置时间为 00:00:00 以便只计算日期差异
-  purchaseDate.setHours(0, 0, 0, 0);
-  today.setHours(0, 0, 0, 0);
-  
-  const diffTime = today.getTime() - purchaseDate.getTime();
-  const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
-  
-  return Math.max(0, diffDays);
+export const getDaysSincePurchase = (dateString, now = new Date()) => {
+  const purchase = parseLocalDate(dateString);
+  if (!purchase) return 0;
+  return Math.max(0, dayNumber(now) - dayNumber(purchase));
 };
 
 /**
  * 格式化购买天数为文本
- * @param {number} days - 购买天数
- * @returns {string} - 格式化文本
  */
 export const formatDaysSincePurchase = (days, language = 'zh') => {
   if (language === 'en') {

@@ -3,75 +3,13 @@ import { DndContext, DragOverlay } from "@dnd-kit/core";
 import FridgePanel from "./FridgePanel";
 import IngredientCard from "./IngredientCard";
 import RecipePanel from "./RecipePanel";
-import { getTodayDate, isNonExpiringIngredient } from "../utils/dateUtils";
-import { createIngredientId } from "../utils/ingredientIds";
+import {
+  getBatchKey,
+  moveBetweenStorages,
+  normalizeIngredient,
+  isStorageArea,
+} from "../utils/inventory";
 import { useLanguage } from "../i18n/LanguageContext";
-
-function calcExpiresAt(purchaseDate, shelfLife, storage, name) {
-  if (isNonExpiringIngredient(storage, name)) return "";
-  if (!purchaseDate || typeof shelfLife !== "number") return "";
-  const d = new Date(purchaseDate);
-  if (Number.isNaN(d.getTime())) return "";
-  d.setDate(d.getDate() + shelfLife);
-  return d.toISOString().split("T")[0];
-}
-
-function normStorage(s) {
-  if (!s) return "fridge";
-  if (s === "room") return "pantry";
-  return s;
-}
-
-function normalizeIngredient(it) {
-  const storage = normStorage(it.storage || "fridge");
-  return {
-    ...it,
-    purchaseDate: it.purchaseDate ?? it.purchase_date,
-    shelfLife: typeof it.shelfLife === "number" ? it.shelfLife : it.shelf_life,
-    storage,
-    unit: it.unit || "个",
-    amount: Number(it.amount || 0),
-  };
-}
-
-function consumeFromList(
-  list,
-  { name, unit, fromStorage, expiresAt, qty, matchExpiresAt }
-) {
-  const next = [...list];
-  let need = qty;
-
-  for (let i = 0; i < next.length && need > 0; i++) {
-    const it = next[i];
-    const itStorage = normStorage(it.storage || "fridge");
-    if (itStorage !== fromStorage) continue;
-    if (it.name !== name) continue;
-    if ((it.unit || "") !== (unit || "")) continue;
-
-    if (matchExpiresAt) {
-      const itShelf = typeof it.shelfLife === "number" ? it.shelfLife : 7;
-      const itExp = calcExpiresAt(it.purchaseDate, itShelf, itStorage, it.name);
-      if (itExp !== expiresAt) continue;
-    }
-
-    const cur = Number(it.amount || 0);
-    if (cur <= 0) continue;
-
-    const take = Math.min(cur, need);
-    const left = cur - take;
-
-    if (left <= 0) {
-      next.splice(i, 1);
-      i -= 1;
-    } else {
-      next[i] = { ...it, amount: left };
-    }
-
-    need -= take;
-  }
-
-  return { nextList: next, removedQty: qty - need };
-}
 
 export default function MainPage({
   ingredients,
@@ -89,51 +27,27 @@ export default function MainPage({
 
   const [activeAggItem, setActiveAggItem] = useState(null);
 
+  // `value` is kept as the raw input string so the field can be cleared and
+  // retyped; it is parsed and clamped only when the move is confirmed.
   const [moveModal, setMoveModal] = useState({
     open: false,
     max: 1,
-    value: 1,
+    value: "1",
     payload: null,
   });
 
   const closeModal = () =>
-    setMoveModal({ open: false, max: 1, value: 1, payload: null });
+    setMoveModal({ open: false, max: 1, value: "1", payload: null });
 
   const handleDragStart = (event) => {
     const data = event?.active?.data?.current;
     if (!data) return;
 
-    const rep = list.find((it) => {
-      const itStorage = normStorage(it.storage || "fridge");
-      if (it.name !== data.name) return false;
-      if ((it.unit || "") !== (data.unit || "")) return false;
-      if (itStorage !== data.fromStorage) return false;
-
-      if (isNonExpiringIngredient(data.fromStorage, data.name)) return true;
-
-      const itShelf = typeof it.shelfLife === "number" ? it.shelfLife : 7;
-      const itExp = calcExpiresAt(
-        it.purchaseDate,
-        itShelf,
-        itStorage,
-        it.name
-      );
-      return itExp === data.expiresAt;
-    });
-
+    const rep = list.find((it) => getBatchKey(it) === data.batchKey);
     setActiveAggItem(
       rep
-        ? { ...rep, amount: data.amount, _expiresAt: data.expiresAt }
-        : {
-            id: "overlay",
-            name: data.name,
-            unit: data.unit,
-            storage: data.fromStorage,
-            amount: data.amount,
-            purchaseDate: getTodayDate(),
-            shelfLife: data.fromStorage === "freezer" ? 9999 : 7,
-            _expiresAt: data.expiresAt,
-          }
+        ? { ...rep, amount: data.amount, _aggKey: data.batchKey }
+        : null
     );
   };
 
@@ -149,100 +63,42 @@ export default function MainPage({
     if (!over) return;
 
     const toStorage = over.id;
-    const ALLOWED = new Set(["fridge", "freezer", "pantry", "condiment"]);
-    if (!ALLOWED.has(toStorage)) return;
+    if (!isStorageArea(toStorage)) return;
 
     const data = active?.data?.current;
-    if (!data) return;
+    if (!data?.batchKey || !data.fromStorage) return;
+    if (data.fromStorage === toStorage) return;
 
-    const { name, unit, fromStorage, amount, expiresAt } = data;
-    if (!name || !fromStorage || fromStorage === toStorage) return;
-
-    const max = Math.max(1, Number(amount || 1));
+    const max = Math.max(1, Number(data.amount || 1));
 
     setMoveModal({
       open: true,
       max,
-      value: max,
-      payload: {
-        toStorage,
-        data: { name, unit, fromStorage, expiresAt, total: max },
-      },
+      value: String(max),
+      payload: { toStorage, batchKey: data.batchKey },
     });
+  };
+
+  const parseMoveValue = (value, max) => {
+    const parsed = Math.floor(Number(value));
+    if (!Number.isFinite(parsed)) return 1;
+    return Math.max(1, Math.min(max, parsed));
   };
 
   const confirmMove = () => {
     const payload = moveModal.payload;
     if (!payload) return;
 
-    const qty = Math.max(
-      1,
-      Math.min(moveModal.max, Number(moveModal.value || 1))
-    );
-    const { toStorage, data } = payload;
-    const { name, unit, fromStorage, expiresAt } = data;
-
+    const qty = parseMoveValue(moveModal.value, moveModal.max);
     closeModal();
 
     setIngredients((prev) => {
-      const base = (prev || []).map(normalizeIngredient);
-
-      const matchExpiresAt = !isNonExpiringIngredient(fromStorage, name);
-
-      const { nextList: afterConsume, removedQty } = consumeFromList(base, {
-        name,
-        unit,
-        fromStorage,
-        expiresAt,
+      const { list: next, movedQty } = moveBetweenStorages(prev || [], {
+        batchKey: payload.batchKey,
+        toStorage: payload.toStorage,
         qty,
-        matchExpiresAt,
       });
-
-      if (removedQty <= 0) return prev;
-
-      const today = getTodayDate();
-
-      let newItem;
-      if (fromStorage === "freezer" && toStorage === "fridge") {
-        newItem = {
-          id: createIngredientId(),
-          name,
-          unit: unit || "个",
-          amount: removedQty,
-          storage: "fridge",
-          purchaseDate: today,
-          shelfLife: 2,
-        };
-      } else {
-        const rep = base.find((it) => {
-          const s = normStorage(it.storage || "fridge");
-          if (s !== fromStorage) return false;
-          if (it.name !== name) return false;
-          if ((it.unit || "") !== (unit || "")) return false;
-          if (!matchExpiresAt) return true;
-
-          const itShelf = typeof it.shelfLife === "number" ? it.shelfLife : 7;
-          const itExp = calcExpiresAt(it.purchaseDate, itShelf, s, it.name);
-          return itExp === expiresAt;
-        });
-
-        newItem = {
-          id: createIngredientId(),
-          name,
-          unit: unit || rep?.unit || "个",
-          amount: removedQty,
-          storage: toStorage,
-          purchaseDate: rep?.purchaseDate || today,
-          shelfLife:
-            toStorage === "freezer"
-              ? 9999
-              : typeof rep?.shelfLife === "number"
-              ? rep.shelfLife
-              : 7,
-        };
-      }
-
-      return [...afterConsume, newItem];
+      return movedQty > 0 ? next : prev;
     });
   };
 
@@ -361,7 +217,7 @@ export default function MainPage({
                   onClick={() =>
                     setMoveModal((s) => ({
                       ...s,
-                      value: Math.max(1, Number(s.value || 1) - 1),
+                      value: String(parseMoveValue(s.value, s.max) - 1 || 1),
                     }))
                   }
                 >
@@ -370,14 +226,20 @@ export default function MainPage({
 
                 <input
                   className="w-20 h-10 text-center rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none font-black text-base"
+                  inputMode="numeric"
                   value={moveModal.value}
                   onChange={(e) => {
-                    const v = Number(e.target.value);
-                    if (!Number.isFinite(v)) return;
+                    const raw = e.target.value.replace(/[^0-9]/g, "");
+                    setMoveModal((s) => ({ ...s, value: raw }));
+                  }}
+                  onBlur={() =>
                     setMoveModal((s) => ({
                       ...s,
-                      value: Math.max(1, Math.min(s.max, v)),
-                    }));
+                      value: String(parseMoveValue(s.value, s.max)),
+                    }))
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") confirmMove();
                   }}
                 />
 
@@ -387,7 +249,9 @@ export default function MainPage({
                   onClick={() =>
                     setMoveModal((s) => ({
                       ...s,
-                      value: Math.min(s.max, Number(s.value || 1) + 1),
+                      value: String(
+                        Math.min(s.max, parseMoveValue(s.value, s.max) + 1)
+                      ),
                     }))
                   }
                 >

@@ -11,9 +11,11 @@ Fridge Manager 将食材划分为冷藏、冷冻、常温和调味料四个区�
 - 四个存储区域：冷藏、冷冻、常温、调味料。
 - 添加食材时记录名称、数量、单位、购买日期和保质期。
 - 支持拖拽食材，并可选择只移动当前批次中的一部分。
-- 增加库存时创建新的购买批次。
+- 增加库存时创建新的购买批次；同一天购买的同种食材会合并到当天的批次。
 - 减少库存时优先消耗更早到期的批次。
-- 冷冻食材移动到冷藏区时，按照解冻后的保质期重新计算。
+- 移入冷冻区时保留原保质期，冷冻期间暂停倒计时。
+- 冷冻食材移到冷藏区按解冻处理，从当天起重新计算 2 天保质期；移到常温或调味料区时，从当天起按食材自身保质期重新计算。
+- 所有日期按用户所在时区的本地日期计算。
 - 根据存储区域采用不同的排序和到期提示。
 
 ### 菜谱推荐
@@ -46,6 +48,8 @@ Fridge Manager 将食材划分为冷藏、冷冻、常温和调味料四个区�
 - 未登录时使用浏览器 `localStorage`，无需配置后端即可体验。
 - 登录后使用 Supabase Auth 邮箱 Magic Link。
 - 登录用户的库存和偏好保存到 Supabase。
+- 每次同步只上传发生变化的食材，避免把其他设备已删除的食材重新写回云端。
+- 离线修改会记录在本地，联网后再上传。
 - Row Level Security 确保用户只能访问自己的数据。
 - 游客数据和登录用户数据使用不同的本地存储空间。
 
@@ -58,6 +62,8 @@ Fridge Manager 将食材划分为冷藏、冷冻、常温和调味料四个区�
 - 英文翻译对应的上游提交：[HowToCook PR #1664](https://github.com/Anduin2017/HowToCook/pull/1664)
 
 中文数据由仓库中的构建脚本解析为结构化 JSON，包括菜名、原料、步骤、分类、难度和推荐标签。
+
+菜谱匹配使用的 `ingredientKeys` 由 `scripts/buildHowToCookDataset.js` 通过 `src/utils/ingredientNormalize.js` 生成。修改别名规则后需要重新生成数据，否则推荐结果不会更新。
 
 英文数据来自 `HowToCookWithEnglish` 的 `a9f4489` 快照。当前项目映射了 323 道英文菜谱，并在英文界面中按需加载。由于英文翻译快照早于当前中文数据，部分后来新增的菜谱暂时没有对应英文内容；这类菜谱会显示明确提示，不会生成或伪造英文步骤。
 
@@ -118,7 +124,15 @@ Vite 默认地址通常为：
 http://localhost:5173
 ```
 
-### 4. 构建生产版本
+### 4. 运行测试
+
+```bash
+npm test
+```
+
+测试使用 Node 内置的 `node:test`，覆盖日期计算、库存批次、云端同步和菜谱忌口规则，不需要额外依赖。
+
+### 5. 构建生产版本
 
 ```bash
 npm run build
@@ -242,7 +256,7 @@ npm run build:recipes:en -- /path/to/HowToCookWithEnglish/translation/en/dishes
 ## 项目结构
 
 ```text
-fridge-manager/
+fridge-manager-new/
 ├── src/
 │   ├── App.jsx
 │   ├── main.jsx
@@ -270,9 +284,15 @@ fridge-manager/
 │       ├── ingredientIds.js
 │       ├── ingredientNormalize.js
 │       ├── ingredientValidation.js
+│       ├── inventory.js          # 批次、加减、移动等库存规则
 │       ├── recipeMatching.js
+│       ├── syncState.js          # 云端同步的变更追踪
 │       ├── templates.js
 │       └── userData.js
+├── tests/
+│   ├── inventory.test.js
+│   ├── recipeMatching.test.js
+│   └── syncState.test.js
 ├── scripts/
 │   ├── buildHowToCookDataset.js
 │   ├── importHowToCookEnglish.js
@@ -290,7 +310,8 @@ fridge-manager/
 - 推荐菜谱不会自动扣减库存。
 - 英文菜谱来自机器翻译快照，质量取决于来源文件。
 - 中文主仓库后来新增的部分菜谱暂时没有英文版本。
-- 当前没有独立的自动化测试命令，提交前至少应执行 `npm run build`。
+- 多设备同时修改同一项食材时，以最后上传的修改为准；其他设备需要刷新页面才能看到最新数据。
+- 提交前建议执行 `npm test` 和 `npm run build`（GitHub Actions 也会自动运行）。
 
 ## 数据与隐私
 

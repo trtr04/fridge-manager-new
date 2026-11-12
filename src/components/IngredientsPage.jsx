@@ -4,6 +4,7 @@ import { Plus, Minus } from 'lucide-react';
 import { quickTemplates } from '../utils/templates';
 import { getTodayDate } from '../utils/dateUtils';
 import { createIngredientId } from '../utils/ingredientIds';
+import { addStock, consumeByName } from '../utils/inventory';
 import { validateIngredientDraft } from '../utils/ingredientValidation';
 import { useLanguage } from '../i18n/LanguageContext';
 
@@ -92,68 +93,24 @@ function IngredientsPage({ ingredients, setIngredients, onComplete, user }) {
   const getCount = (name) => ingredients.filter(i => i.name === name).reduce((sum, i) => sum + (Number(i.amount) || 0), 0);
 
   /* -------- 1. 点击卡片增加数量 (+1) -------- */
+  // Each tap is one item bought today: same-day stock is topped up, while an
+  // older batch keeps its own purchase date and expiry.
   const onAddTemplate = (template) => {
-    // 检查是否已经有同名且同存储位置的食材
-    const existingIdx = ingredients.findIndex(i => i.name === template.name && i.storage === template.storage);
-    
-    if (existingIdx > -1) {
-      // 如果已有，只加数量
-      const newArr = [...ingredients];
-      newArr[existingIdx] = { 
-        ...newArr[existingIdx], 
-        amount: (Number(newArr[existingIdx].amount) || 0) + 1 
-      };
-      setIngredients(newArr);
-    } else {
-      // 如果没有，新加一行，并生成唯一 UUID
-      const newItem = { 
-        ...template, 
-        id: createIngredientId(),
-        amount: 1, 
-        purchaseDate: getTodayDate(),
-        created_at: new Date().toISOString()
-      };
-      setIngredients(prev => [...prev, newItem]);
-    }
+    setIngredients((prev) =>
+      addStock(prev || [], {
+        name: template.name,
+        amount: 1,
+        unit: template.unit,
+        storage: template.storage,
+        shelfLife: template.shelfLife,
+        category: template.category || '其他',
+      })
+    );
   };
 
-/* -------- 2. 带有详细日志的减少数量逻辑 -------- */
+  /* -------- 2. 减少数量：优先消耗最早到期的批次 -------- */
   const decreaseCountByOne = (name) => {
-    console.group(`🔍 Debug: 减少食材 [${name}]`);
-    
-    // 1. 检查原始状态
-    console.log("当前冰箱所有食材:", JSON.parse(JSON.stringify(ingredients)));
-    
-    // 2. 查找索引
-    const idx = ingredients.findIndex(i => i.name === name);
-    console.log("查找到的索引位置:", idx);
-
-    if (idx === -1) {
-      console.error("❌ 错误: 没找到该食材，无法减少");
-      console.groupEnd();
-      return;
-    }
-
-    const newArr = [...ingredients];
-    const item = { ...newArr[idx] }; // 使用浅拷贝，防止直接修改状态
-    console.log("找到目标对象:", item);
-
-    // 3. 执行减少逻辑
-    if (item.amount <= 1) {
-      console.log("🗑️ 数量归零，准备从数组中移除该项");
-      newArr.splice(idx, 1);
-    } else {
-      const oldAmount = item.amount;
-      item.amount = Number(oldAmount) - 1;
-      newArr[idx] = item;
-      console.log(`📉 数量更新: ${oldAmount} -> ${item.amount}`);
-    }
-
-    // 4. 提交更新
-    console.log("🚀 准备执行 setIngredients，新数组长度:", newArr.length);
-    setIngredients(newArr);
-    
-    console.groupEnd();
+    setIngredients((prev) => consumeByName(prev || [], name, 1).list);
   };
 
   /* -------- 3. 手动添加逻辑 -------- */
